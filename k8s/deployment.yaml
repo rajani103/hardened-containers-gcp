@@ -1,0 +1,38 @@
+# Applied with envsubst; IMAGE_REF must be a digest: ...app@sha256:...
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cve-demo
+  labels: { app: cve-demo }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: cve-demo }
+  template:
+    metadata:
+      labels: { app: cve-demo }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: ${IMAGE_REF}
+          ports: [{ containerPort: 8080 }]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: tmp
+          emptyDir: {}

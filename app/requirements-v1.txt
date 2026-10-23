@@ -1,0 +1,5 @@
+# "Yesterday's release". gunicorn 21.2.0 has a known HIGH (CVE-2024-1135,
+# request smuggling, fixed in 22.0.0). It passes a CRITICAL-only gate, so it
+# ships. This is the image the self-healing loop replaces.
+flask==3.1.0
+gunicorn==21.2.0

@@ -1,0 +1,68 @@
+# STAGE 1 · build -> on-demand scan -> severity gate -> push (by Cloud Build)
+# Cloud Build pushes via `images:` so it also writes the built-by-cloud-build
+# attestation (provenance). An explicit `docker push` step would NOT.
+substitutions:
+  _REGION: asia-south1
+  _SCAN_LOCATION: asia
+  _REPO: demo
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/app
+  _BASE_REGISTRY: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/hardened
+  _DOCKERFILE: Dockerfile.dhi
+  _REQS: requirements.txt
+  _FAIL_ON: CRITICAL            # CRITICAL|HIGH tightens the gate
+
+steps:
+  # BuildKit (docker-container driver): Docker Hardened Images ship zstd
+  # layers, which Cloud Build's host Docker daemon can't unpack. BuildKit can,
+  # and exports a gzip-recompressed image back to the daemon for the scan step.
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker buildx create --name bk --driver docker-container --use >/dev/null
+        docker buildx build --provenance=false \
+          --output type=docker,compression=gzip,force-compression=true \
+          -f ${_DOCKERFILE} \
+          --build-arg BASE_REGISTRY=${_BASE_REGISTRY} \
+          --build-arg REQS=${_REQS} \
+          -t ${_IMAGE}:${BUILD_ID} .
+
+  - id: scan
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud artifacts docker images scan ${_IMAGE}:${BUILD_ID} \
+          --location=${_SCAN_LOCATION} \
+          --format='value(response.scan)' > /workspace/scan_id.txt
+
+  - id: gate
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud artifacts docker images list-vulnerabilities $$(cat /workspace/scan_id.txt) \
+          --format='value(vulnerability.effectiveSeverity)' > /workspace/severities.txt
+        echo "---- findings by severity ----"
+        sort /workspace/severities.txt | uniq -c
+        if grep -Eq "^(${_FAIL_ON})$$" /workspace/severities.txt; then
+          echo "GATE FAILED: found ${_FAIL_ON}. Image will not be pushed."
+          exit 1
+        fi
+        echo "GATE PASSED"
+
+images:
+  - ${_IMAGE}:${BUILD_ID}
+
+serviceAccount: projects/${PROJECT_ID}/serviceAccounts/cve-demo-builder@${PROJECT_ID}.iam.gserviceaccount.com
+options:
+  requestedVerifyOption: VERIFIED
+  logging: CLOUD_LOGGING_ONLY
+  dynamicSubstitutions: true
+  substitutionOption: ALLOW_LOOSE
+timeout: 1200s

@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+# Same app on a Docker Hardened Image.
+# BASE_REGISTRY defaults to dhi.io for local builds; Cloud Build passes the
+# Artifact Registry mirror so CI never depends on an external registry login.
+ARG BASE_REGISTRY=dhi.io
+ARG PY_TAG=3.13-alpine3.23
+
+# --- build stage: -dev variant has pip and a package manager ---
+FROM ${BASE_REGISTRY}/python:${PY_TAG}-dev AS builder
+ARG REQS=requirements.txt
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH="/app/venv/bin:$PATH"
+WORKDIR /app
+RUN python -m venv /app/venv
+COPY app/${REQS} requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# --- runtime stage: minimal, no shell, no package manager ---
+FROM ${BASE_REGISTRY}/python:${PY_TAG}
+ARG PY_TAG
+ENV PYTHONUNBUFFERED=1 PATH="/app/venv/bin:$PATH" BASE_IMAGE="dhi/python:${PY_TAG}"
+WORKDIR /app
+COPY --from=builder /app/venv /app/venv
+COPY app/app.py .
+EXPOSE 8080
+ENTRYPOINT ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]

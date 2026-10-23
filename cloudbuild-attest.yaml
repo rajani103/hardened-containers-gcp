@@ -1,0 +1,52 @@
+# STAGE 2 · re-scan the PUSHED digest -> gate -> sign vulnz attestation -> tag
+# Separate from the build on purpose: the signer only signs a digest it has
+# scanned itself, never "whatever the build said".
+# Run: gcloud builds submit --no-source --config cloudbuild-attest.yaml \
+#        --substitutions=_TAG=<build id>,_APP_TAG=prod
+substitutions:
+  _REGION: asia-south1
+  _SCAN_LOCATION: asia
+  _REPO: demo
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/app
+  _TAG: ""
+  _APP_TAG: prod
+  _FAIL_ON: CRITICAL
+  _ATTESTOR: vulnz-attestor
+  _KEYRING: binauthz
+  _KEY: vulnz-signer
+
+steps:
+  - id: verify-and-sign
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        DIGEST=$$(gcloud artifacts docker images describe ${_IMAGE}:${_TAG} \
+          --format='value(image_summary.digest)')
+        URI="${_IMAGE}@$${DIGEST}"
+        echo "re-scanning $${URI}"
+        SCAN=$$(gcloud artifacts docker images scan "$${URI}" --remote \
+          --location=${_SCAN_LOCATION} --format='value(response.scan)')
+        gcloud artifacts docker images list-vulnerabilities "$${SCAN}" \
+          --format='value(vulnerability.effectiveSeverity)' > /workspace/sev.txt
+        sort /workspace/sev.txt | uniq -c
+        if grep -Eq "^(${_FAIL_ON})$$" /workspace/sev.txt; then
+          echo "REFUSING TO SIGN: ${_FAIL_ON} found on $${URI}"
+          exit 1
+        fi
+        gcloud beta container binauthz attestations sign-and-create \
+          --artifact-url="$${URI}" \
+          --attestor=${_ATTESTOR} --attestor-project=${PROJECT_ID} \
+          --keyversion-project=${PROJECT_ID} --keyversion-location=${_REGION} \
+          --keyversion-keyring=${_KEYRING} --keyversion-key=${_KEY} --keyversion=1
+        gcloud artifacts docker tags add ${_IMAGE}:${_TAG} ${_IMAGE}:${_APP_TAG}
+        echo "SIGNED: $${URI}"
+
+serviceAccount: projects/${PROJECT_ID}/serviceAccounts/cve-demo-builder@${PROJECT_ID}.iam.gserviceaccount.com
+options:
+  logging: CLOUD_LOGGING_ONLY
+  dynamicSubstitutions: true
+  substitutionOption: ALLOW_LOOSE
+timeout: 900s
